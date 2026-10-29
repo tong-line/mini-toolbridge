@@ -1,0 +1,4 @@
+[
+  {"op":"create_canvas","args":{"width":400,"height":400,"bg":"#f7f7fa"}},
+  {"op":"create_gear","args":{"cx":200,"cy":200,"r":150,"teeth":10}}
+]

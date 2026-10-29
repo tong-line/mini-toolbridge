@@ -1,0 +1,7 @@
+[
+  {"op":"create_canvas","args":{"width":400,"height":400,"bg":"#f7f7fa"}},
+  {"op":"create_circle","args":{"cx":200,"cy":200,"r":170,"stroke":"#1f3b66","fill":"#ffffff"}},
+  {"op":"create_circle","args":{"cx":200,"cy":200,"r":6,"stroke":"#1f3b66","fill":"#1f3b66"}},
+  {"op":"create_hand","args":{"angle":305,"length":95,"width":9,"stroke":"#1f3b66"}},
+  {"op":"create_hand","args":{"angle":60,"length":140,"width":6,"stroke":"#c0392b"}}
+]
