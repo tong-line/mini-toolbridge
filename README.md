@@ -64,6 +64,16 @@ export TB_MODEL=deepseek-chat
 
 # 6. 没有 key 时离线跑通链路
 ./build/tb ask "画一个钟表" --offline -o clock.svg
+
+# 7. 本地 mock SSE 服务 + 流式（不需要任何 API key）
+./build/tb mock-llm --port 8081 &
+./build/tb ask "画一个钟表" --stream \
+    --url http://127.0.0.1:8081/v1/chat/completions -o clock.svg
+
+# 8. 演示「流式校验提前中止」：第 4 条是非法指令
+./build/tb mock-llm --port 8082 --bad &
+./build/tb ask "画一个钟表" --stream \
+    --url http://127.0.0.1:8082/v1/chat/completions -o partial.svg
 ```
 
 ---
@@ -124,6 +134,31 @@ create_gear(cx, cy, r, teeth)
 
 ---
 
+## 流式链路（这块是技术重点）
+
+LLM 是流式返回的。等完整回复再解析有两个浪费：首字节延迟 = 全量延迟；模型生成了 2000 token 废话时，你要等完才发现前几个字就错了。
+
+本项目的做法：**边收边校验边执行**。
+
+```
+HTTP chunk ──► SseParser ──► delta 文本 ──► InstructionScanner ──► 完整指令 ──► 校验 ──► 执行
+                                              （跨 chunk 拼装）
+```
+
+实测（mock 流，53 个 token，每个间隔 60ms）：
+
+| 指标 | 数值 |
+|---|---|
+| 首条指令可用 | **259 ms** |
+| 全部完成 | **1352 ms** |
+| 非法指令时的中止时间 | **838 ms**（省掉 38% 的等待） |
+
+三个实现要点：
+
+1. **`SseParser`**：按行累积，空行触发事件。任意字节位置切包都能正确还原（自测用 7 字节一刀验证）。
+2. **`InstructionScanner`**：只跟踪 `{}` 配对与字符串转义，**忽略 `[]`**，所以一个对象被切成三段也能拼回；每凑齐一个对象立刻交给下游。
+3. **提前中止**：校验失败时从回调里抛异常，沿协程栈展开，连接立即断开 —— 不再消费剩余流。
+
 ## 接入大模型
 
 `include/tb/toolbridge.hpp` 里的 `ILlmProvider` 是唯一接口：
@@ -161,11 +196,16 @@ TB_API_BASE=http://localhost:11434/v1  TB_MODEL=qwen2.5-coder
 
 ```
 mini-toolbridge/
-├── include/tb/toolbridge.hpp   全部公开接口
-├── src/toolbridge.cpp          组件库 / 七层校验 / 组合件 / SVG 执行器 / 管道
-├── src/llm.cpp                 ILlmProvider 两种实现 + prompt 渲染 + 回复解析
-├── apps/tb.cpp                 命令行：library / validate / render / ask
-├── examples/                   clock.json（钟表）gear.json（齿轮）bad.json（反例）
+├── include/tb/toolbridge.hpp   组件库 / 校验 / 组合件 / 执行器 / LLM 接口
+├── include/tb/stream.hpp       SSE 解析 + 增量指令提取
+├── include/tb/net.hpp          异步流式 POST + 本地 mock 服务
+├── src/toolbridge.cpp          七层校验 / 组合件 / SVG 执行器 / 管道
+├── src/stream.cpp              SseParser / InstructionScanner
+├── src/net_stream.cpp          协程 HTTP 客户端（http/https）+ mock LLM
+├── src/llm.cpp                 ILlmProvider + prompt 渲染 + 回复解析
+├── apps/tb.cpp                 CLI：library / validate / render / ask / mock-llm
+├── tests/stream_selftest.cpp   SSE 切包 + 增量提取自测
+├── examples/                   clock.json / gear.json / bad.json
 └── docs/design.md              设计还原与面试问答
 ```
 
@@ -177,7 +217,9 @@ mini-toolbridge/
 |---|---|
 | 组件库规模 | 5 条基础指令 + 1 个组合件（原场景 700+，**结构同构、规模不同**） |
 | 执行器 | SVG 后端；真实系统的执行器是建模软件的接口 |
-| 错误恢复 | 只报错，未实现「把错误喂回模型自修正」 |
+| 错误恢复 | 流式下可提前中止；未实现「把错误喂回模型自修正」 |
+| 并发 | 单请求；未做并发上限与限流 |
+| TLS | 已支持 https，但未做证书自定义与代理 |
 | 性能 | 未测；700 条指令的查表若为线性扫描，长指令序列下会有开销 |
 
 ---

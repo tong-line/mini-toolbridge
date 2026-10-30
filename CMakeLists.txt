@@ -7,14 +7,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # boost::json 需要编译库：sudo apt install -y libboost-json-dev
-find_package(Boost 1.75 REQUIRED COMPONENTS json)
+find_package(Boost 1.75 REQUIRED COMPONENTS json system)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(tb_core STATIC
     src/toolbridge.cpp
     src/llm.cpp
+    src/stream.cpp
+    src/net_stream.cpp
 )
 target_include_directories(tb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(tb_core PUBLIC Boost::json)
+target_link_libraries(tb_core PUBLIC Boost::json Boost::system OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(tb_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -22,6 +26,12 @@ endif()
 
 add_executable(tb apps/tb.cpp)
 target_link_libraries(tb PRIVATE tb_core)
+
+add_executable(stream_selftest tests/stream_selftest.cpp)
+target_link_libraries(stream_selftest PRIVATE tb_core)
+
+enable_testing()
+add_test(NAME stream_selftest COMMAND stream_selftest)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(tb PRIVATE -Wall -Wextra -Wpedantic)
