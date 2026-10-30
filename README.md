@@ -39,7 +39,10 @@
 
 ```bash
 # 依赖：Boost.JSON
+# Ubuntu / Debian
 sudo apt install -y libboost-json-dev
+# macOS
+brew install boost openssl
 
 cmake -S . -B build
 cmake --build build
@@ -56,21 +59,24 @@ cmake --build build
 # 4. 自定义组件（齿轮 = 2 圆 + N 条辐条）
 ./build/tb render examples/gear.json -o gear.svg
 
-# 5. 走真实大模型（需要环境变量）
+# 5. 引用链：create_connect 连接两个带 id 的圆（引用层校验）
+./build/tb render examples/refs.json -o refs.svg
+
+# 6. 走真实大模型（需要环境变量）
 export TB_API_BASE=https://api.deepseek.com/v1
 export TB_API_KEY=sk-xxxx
 export TB_MODEL=deepseek-chat
 ./build/tb ask "画一个钟表，指针指向 10 点 10 分" -o clock.svg
 
-# 6. 没有 key 时离线跑通链路
+# 7. 没有 key 时离线跑通链路
 ./build/tb ask "画一个钟表" --offline -o clock.svg
 
-# 7. 本地 mock SSE 服务 + 流式（不需要任何 API key）
+# 8. 本地 mock SSE 服务 + 流式（不需要任何 API key）
 ./build/tb mock-llm --port 8081 &
 ./build/tb ask "画一个钟表" --stream \
     --url http://127.0.0.1:8081/v1/chat/completions -o clock.svg
 
-# 8. 演示「流式校验提前中止」：第 4 条是非法指令
+# 9. 演示「流式校验提前中止」：第 4 条是非法指令
 ./build/tb mock-llm --port 8082 --bad &
 ./build/tb ask "画一个钟表" --stream \
     --url http://127.0.0.1:8082/v1/chat/completions -o partial.svg
@@ -87,7 +93,7 @@ export TB_MODEL=deepseek-chat
 | 类型 | 参数类型 | `args.r: 期望 number，收到 string` |
 | 必填 | 必填参数齐全 | `args.length: 缺少必填参数 length` |
 | 范围 | 数值区间 | `args.width: 值 99 超出范围 [0.1, 64]` |
-| 引用 | 引用的对象是否存在 | `args.edge_ref: 引用的对象 b9 不存在` |
+| 引用 | 引用的对象是否存在 | `args.from: 引用的对象 ghost 不存在` |
 | 顺序 | 前置条件 | `create_hand 需要先创建画布，当前模型为空` |
 
 每一层失败都返回**带 JSON 路径**的错误，而不是"加载失败"。
@@ -113,6 +119,7 @@ hand.preconditions = {"canvas_exists"};
 
 - 模型只能在 `create_hand` 的四个参数里选
 - `angle` 只给角度，**端点由执行器算** —— 语义指令与几何计算分离
+- `create_connect` 的 `from`/`to` 是引用参数：对象要先带 `id` 创建，引用层拦截悬空引用（见 `examples/refs.json`）
 - 组件库同时被渲染成 system prompt（见 `tb library`），模型看到的就是这份 schema
 
 ---
@@ -145,7 +152,7 @@ HTTP chunk ──► SseParser ──► delta 文本 ──► InstructionScann
                                               （跨 chunk 拼装）
 ```
 
-实测（mock 流，53 个 token，每个间隔 60ms）：
+实测（示例环境：mock 流，53 个 token，每个间隔 60ms，数值随机器浮动）：
 
 | 指标 | 数值 |
 |---|---|
@@ -175,7 +182,7 @@ public:
 | 实现 | 用途 |
 |---|---|
 | `make_scripted_provider(text)` | 离线调试，固定回复，不联网 |
-| `make_curl_provider(cfg)` | 走 curl 调任意 OpenAI 兼容端点 |
+| `make_http_provider(cfg)` | 走 boost::beast 调任意 OpenAI 兼容端点（带超时） |
 
 **换模型只改环境变量，代码一行不动**：
 
@@ -188,7 +195,7 @@ TB_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1  TB_MODEL=qwen-plu
 TB_API_BASE=http://localhost:11434/v1  TB_MODEL=qwen2.5-coder
 ```
 
-> 密钥通过环境变量交给 curl，不出现在命令行参数里（`ps` 看不到）。
+> 密钥只进请求头，不出现在命令行参数或日志里。
 
 ---
 
@@ -205,7 +212,8 @@ mini-toolbridge/
 ├── src/llm.cpp                 ILlmProvider + prompt 渲染 + 回复解析
 ├── apps/tb.cpp                 CLI：library / validate / render / ask / mock-llm
 ├── tests/stream_selftest.cpp   SSE 切包 + 增量提取自测
-├── examples/                   clock.json / gear.json / bad.json
+├── tests/validate_selftest.cpp 七层校验 + 管道健壮性自测
+├── examples/                   clock.json / gear.json / refs.json / bad.json
 └── docs/design.md              设计还原与面试问答
 ```
 
@@ -215,11 +223,12 @@ mini-toolbridge/
 
 | 项 | 现状 |
 |---|---|
-| 组件库规模 | 5 条基础指令 + 1 个组合件（原场景 700+，**结构同构、规模不同**） |
+| 组件库规模 | 6 条基础指令 + 1 个组合件（原场景 700+，**结构同构、规模不同**） |
 | 执行器 | SVG 后端；真实系统的执行器是建模软件的接口 |
+| TLS | 已支持 https，但未做证书自定义与代理 |
 | 错误恢复 | 流式下可提前中止；未实现「把错误喂回模型自修正」 |
 | 并发 | 单请求；未做并发上限与限流 |
-| TLS | 已支持 https，但未做证书自定义与代理 |
+| 超时 | 网络层支持可选超时（到点取消底层 socket，协程栈正常展开）；同步 ask 已启用 |
 | 性能 | 未测；700 条指令的查表若为线性扫描，长指令序列下会有开销 |
 
 ---

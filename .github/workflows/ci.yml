@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-json-dev libssl-dev
+
+      - name: 配置
+        run: cmake -S . -B build
+
+      - name: 构建
+        run: cmake --build build -j
+
+      - name: 单元自测
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 示例校验
+        run: |
+          ./build/tb validate examples/clock.json
+          ./build/tb validate examples/gear.json
+          ./build/tb validate examples/refs.json
+          ./build/tb render examples/refs.json -o /tmp/refs.svg
+          # bad.json 必须被拒绝（退出码 2），且包含引用层错误
+          if ./build/tb validate examples/bad.json; then exit 1; fi
+          ./build/tb validate examples/bad.json 2>&1 | grep "\[引用\]"
+
+      - name: 端到端冒烟（mock 流式）
+        run: |
+          ./build/tb mock-llm --port 8081 &
+          sleep 1
+          ./build/tb ask "画一个钟表" --stream --url http://127.0.0.1:8081/v1/chat/completions -o /tmp/clock.svg
+          kill %1
