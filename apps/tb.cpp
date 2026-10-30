@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::printf("[在线] %s  model=%s\n", cfg.api_base.c_str(), cfg.model.c_str());
-            provider = make_curl_provider(cfg);
+            provider = make_http_provider(cfg);
         }
 
         const auto t0 = std::chrono::steady_clock::now();

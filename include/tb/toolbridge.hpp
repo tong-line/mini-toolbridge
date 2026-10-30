@@ -19,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -140,7 +141,7 @@ private:
     std::size_t elements_ = 0;
 };
 
-// 显示建模组件库（canvas / circle / line / text / hand）
+// 显示建模组件库（canvas / circle / line / text / hand / connect）
 ComponentLibrary make_display_library();
 // 自定义组件示例：齿轮 = 2 圆 + N 条辐条
 CompositeComponent make_gear_component();
@@ -185,8 +186,8 @@ public:
 // 离线调试用：固定返回一段预设文本，不联网
 std::unique_ptr<ILlmProvider> make_scripted_provider(std::string fixed_reply);
 
-// 走 curl 调任意 OpenAI 兼容端点（DeepSeek / Qwen / Ollama / vLLM 均可）
-std::unique_ptr<ILlmProvider> make_curl_provider(LlmConfig config);
+// 走 boost::beast 调任意 OpenAI 兼容端点（DeepSeek / Qwen / Ollama / vLLM 均可），带超时
+std::unique_ptr<ILlmProvider> make_http_provider(LlmConfig config);
 
 // 从环境变量读：TB_API_BASE / TB_API_KEY / TB_MODEL
 LlmConfig llm_config_from_env();

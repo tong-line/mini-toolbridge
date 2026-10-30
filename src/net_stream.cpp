@@ -66,11 +66,43 @@ bool parse_url(const std::string& url, Url& out) {
 
 // ============================================================ 通用会话
 
+// do_stream 正常退出时取消超时定时器，让超时协程以 operation_aborted 结束、不残留
+struct TimerGuard {
+    asio::steady_timer* timer = nullptr;
+    ~TimerGuard() {
+        if (timer) {
+            timer->cancel();
+        }
+    }
+};
+
 template <class Stream>
 asio::awaitable<HttpStreamResult> do_stream(Stream& stream, const Url& url,
                                             const std::vector<std::pair<std::string, std::string>>& headers,
-                                            const std::string& body, const ChunkCallback& on_chunk) {
+                                            const std::string& body, const ChunkCallback& on_chunk,
+                                            std::chrono::steady_clock::duration timeout) {
     HttpStreamResult result;
+
+    // 超时保护：到点取消底层 socket，挂起的读写以 operation_aborted 结束并正常展开协程栈。
+    // 正常结束时由 TimerGuard 取消定时器。
+    asio::steady_timer timer{stream.get_executor()};
+    TimerGuard guard{&timer};
+    if (timeout.count() > 0) {
+        timer.expires_after(timeout);
+        auto& lowest = beast::get_lowest_layer(stream);
+        asio::co_spawn(
+            stream.get_executor(),
+            [&timer, &lowest, &result]() -> asio::awaitable<void> {
+                error_code ec;
+                co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+                if (ec) {
+                    co_return;   // 正常路径取消了定时器
+                }
+                result.timed_out = true;
+                lowest.cancel();   // 无参 cancel：tcp::socket 与 beast::tcp_stream 都可用
+            }(),
+            asio::detached);
+    }
 
     // 请求：流式响应对应 stream=true 的 LLM 接口
     http::request<http::string_body> req{http::verb::post, url.target, 11};
@@ -139,7 +171,8 @@ asio::awaitable<HttpStreamResult> do_stream(Stream& stream, const Url& url,
 
 asio::awaitable<HttpStreamResult> stream_plain(asio::io_context& ioc, const Url& url,
                                                const std::vector<std::pair<std::string, std::string>>& headers,
-                                               const std::string& body, const ChunkCallback& on_chunk) {
+                                               const std::string& body, const ChunkCallback& on_chunk,
+                                               std::chrono::steady_clock::duration timeout) {
     HttpStreamResult bad;
     error_code ec;
     tcp::resolver resolver{ioc};
@@ -156,14 +189,15 @@ asio::awaitable<HttpStreamResult> stream_plain(asio::io_context& ioc, const Url&
         bad.error = "connect: " + ec.message();
         co_return bad;
     }
-    co_return co_await do_stream(sock, url, headers, body, on_chunk);
+    co_return co_await do_stream(sock, url, headers, body, on_chunk, timeout);
 }
 
 // ============================================================ TLS
 
 asio::awaitable<HttpStreamResult> stream_tls(asio::io_context& ioc, const Url& url,
                                              const std::vector<std::pair<std::string, std::string>>& headers,
-                                             const std::string& body, const ChunkCallback& on_chunk) {
+                                             const std::string& body, const ChunkCallback& on_chunk,
+                                             std::chrono::steady_clock::duration timeout) {
     HttpStreamResult bad;
     // 注意：context 必须比 stream 活得久，不能写成临时对象
     asio::ssl::context ssl_ctx{asio::ssl::context::tls_client};
@@ -197,7 +231,7 @@ asio::awaitable<HttpStreamResult> stream_tls(asio::io_context& ioc, const Url& u
         co_return bad;
     }
 
-    auto r = co_await do_stream(stream, url, headers, body, on_chunk);
+    auto r = co_await do_stream(stream, url, headers, body, on_chunk, timeout);
 
     error_code ignored;
     co_await stream.async_shutdown(asio::redirect_error(asio::use_awaitable, ignored));
@@ -211,7 +245,7 @@ asio::awaitable<HttpStreamResult> stream_tls(asio::io_context& ioc, const Url& u
 asio::awaitable<HttpStreamResult> http_post_stream(
     asio::io_context& ioc, const std::string& url,
     const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body,
-    ChunkCallback on_chunk) {
+    ChunkCallback on_chunk, std::chrono::steady_clock::duration timeout) {
     Url parsed;
     if (!parse_url(url, parsed)) {
         HttpStreamResult bad;
@@ -219,9 +253,9 @@ asio::awaitable<HttpStreamResult> http_post_stream(
         co_return bad;
     }
     if (parsed.tls) {
-        co_return co_await stream_tls(ioc, parsed, headers, body, on_chunk);
+        co_return co_await stream_tls(ioc, parsed, headers, body, on_chunk, timeout);
     }
-    co_return co_await stream_plain(ioc, parsed, headers, body, on_chunk);
+    co_return co_await stream_plain(ioc, parsed, headers, body, on_chunk, timeout);
 }
 
 // ============================================================ mock LLM 服务
@@ -347,7 +381,7 @@ void run_mock_llm(std::uint16_t port, bool bad) {
     tcp::acceptor acceptor{ioc, {tcp::v4(), port}};
 
     std::printf("mock LLM 已启动: http://127.0.0.1:%u/v1/chat/completions\n", port);
-    std::printf("（Ctrl-C 退出）%s\n", bad ? "  [bad 模式：第 3 条为非法指令]" : "");
+    std::printf("（Ctrl-C 退出）%s\n", bad ? "  [bad 模式：第 4 条为非法指令]" : "");
 
     asio::co_spawn(ioc, mock_listener(acceptor, bad), asio::detached);
     ioc.run();

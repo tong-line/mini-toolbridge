@@ -1,13 +1,40 @@
+#include "tb/net.hpp"
 #include "tb/toolbridge.hpp"
 
-#include <cstdio>
+#include <boost/asio.hpp>
+
+#include <chrono>
 #include <cstdlib>
 #include <sstream>
-
-#include <unistd.h>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace tb {
 namespace {
+
+// 把参数 schema 渲染成给模型看的说明（基础指令与组合件共用）
+void append_args(std::ostringstream& os, const std::vector<Argument>& args) {
+    bool first = true;
+    for (const auto& a : args) {
+        if (!first) {
+            os << ", ";
+        }
+        first = false;
+        os << a.name << "(";
+        switch (a.type) {
+            case ArgType::Number: os << "number"; break;
+            case ArgType::String: os << "string"; break;
+            case ArgType::Bool:   os << "bool"; break;
+            case ArgType::Ref:    os << "ref:" << a.ref_kind; break;
+        }
+        if (a.has_range) {
+            os << ", " << a.min << "~" << a.max;
+        }
+        os << (!a.required ? ", 可选" : "");
+        os << ")";
+    }
+}
 
 }  // namespace
 
@@ -29,18 +56,17 @@ std::unique_ptr<ILlmProvider> make_scripted_provider(std::string fixed_reply) {
     return std::make_unique<ScriptedProvider>(std::move(fixed_reply));
 }
 
-// ============================================================ curl provider
+// ============================================================ 在线 provider
 //
-// 用 curl 子进程调任意 OpenAI 兼容端点，避免引入 TLS 依赖。
+// 用 boost::beast 直接调任意 OpenAI 兼容端点，与流式链路共用同一个网络层，带超时。
+// 密钥只出现在请求头里，不进命令行参数、不进日志。
+//
 // 环境变量：
 //   TB_API_BASE  例 https://api.deepseek.com/v1
 //   TB_API_KEY   密钥
 //   TB_MODEL     例 deepseek-chat
-//
-// ⚠️ 密钥通过环境变量传给 curl，不出现在命令行参数里（ps 看不到）。
 
-// 正确的做法：把请求体写进临时文件，用 popen 只读响应
-LlmReply curl_complete(LlmConfig& cfg, const std::string& system_prompt,
+LlmReply http_complete(const LlmConfig& cfg, const std::string& system_prompt,
                        const std::string& user_prompt) {
     if (cfg.api_base.empty() || cfg.api_key.empty() || cfg.model.empty()) {
         return LlmReply{false, "",
@@ -56,40 +82,39 @@ LlmReply curl_complete(LlmConfig& cfg, const std::string& system_prompt,
     body["messages"] = std::move(messages);
     const std::string payload = boost::json::serialize(body);
 
-    // 请求体写到临时文件
-    const char* tmp_template = "/tmp/tb_req_XXXXXX";
-    char tmp_path[64];
-    std::snprintf(tmp_path, sizeof tmp_path, "%s", tmp_template);
-    const int fd = ::mkstemp(tmp_path);
-    if (fd < 0) {
-        return LlmReply{false, "", "无法创建临时文件"};
+    std::string url = cfg.api_base;
+    if (url.back() == '/') {
+        url.pop_back();
     }
-    std::FILE* f = ::fdopen(fd, "w");
-    if (f == nullptr) {
-        ::close(fd);
-        return LlmReply{false, "", "fdopen 失败"};
-    }
-    std::fwrite(payload.data(), 1, payload.size(), f);
-    std::fclose(f);
+    url += "/chat/completions";
 
-    std::ostringstream cmd;
-    cmd << "curl -sS --max-time " << cfg.timeout_sec
-        << " -X POST \"${TB_API_BASE}/chat/completions\""
-        << " -H \"Content-Type: application/json\""
-        << " -H \"Authorization: Bearer ${TB_API_KEY}\""
-        << " --data-binary @" << tmp_path;
+    std::vector<std::pair<std::string, std::string>> headers{
+        {"content-type", "application/json"},
+        {"authorization", "Bearer " + cfg.api_key},
+    };
 
     std::string response;
-    if (std::FILE* pipe = ::popen(cmd.str().c_str(), "r")) {
-        char buf[4096];
-        std::size_t n = 0;
-        while ((n = std::fread(buf, 1, sizeof buf, pipe)) > 0) {
-            response.append(buf, n);
-        }
-        ::pclose(pipe);
-    }
-    std::remove(tmp_path);
+    HttpStreamResult res;
+    boost::asio::io_context ioc{1};
+    boost::asio::co_spawn(
+        ioc,
+        [&]() -> boost::asio::awaitable<void> {
+            res = co_await http_post_stream(
+                ioc, url, headers, payload,
+                [&](std::string_view chunk) { response.append(chunk.data(), chunk.size()); },
+                std::chrono::seconds(cfg.timeout_sec));
+        }(),
+        boost::asio::detached);
+    ioc.run();
 
+    if (!res.ok) {
+        if (res.timed_out) {
+            return LlmReply{false, "",
+                            "请求超时（" + std::to_string(cfg.timeout_sec) + " 秒）"};
+        }
+        return LlmReply{false, "",
+                        res.error.empty() ? "HTTP " + std::to_string(res.status) : res.error};
+    }
     if (response.empty()) {
         return LlmReply{false, "", "空响应（检查网络与端点）"};
     }
@@ -123,19 +148,20 @@ LlmReply curl_complete(LlmConfig& cfg, const std::string& system_prompt,
                     ""};
 }
 
-class RealCurlProvider : public ILlmProvider {
+class RealHttpProvider : public ILlmProvider {
 public:
-    explicit RealCurlProvider(LlmConfig cfg) : cfg_(std::move(cfg)) {}
+    explicit RealHttpProvider(LlmConfig cfg) : cfg_(std::move(cfg)) {}
+
     LlmReply complete(const std::string& system_prompt, const std::string& user_prompt) override {
-        return curl_complete(cfg_, system_prompt, user_prompt);
+        return http_complete(cfg_, system_prompt, user_prompt);
     }
 
 private:
     LlmConfig cfg_;
 };
 
-std::unique_ptr<ILlmProvider> make_curl_provider(LlmConfig config) {
-    return std::make_unique<RealCurlProvider>(std::move(config));
+std::unique_ptr<ILlmProvider> make_http_provider(LlmConfig config) {
+    return std::make_unique<RealHttpProvider>(std::move(config));
 }
 
 LlmConfig llm_config_from_env() {
@@ -166,25 +192,7 @@ std::string render_library_prompt(const ComponentLibrary& lib,
             os << "：" << cmd.summary;
         }
         os << "\n  参数：";
-        bool first = true;
-        for (const auto& a : cmd.args) {
-            if (!first) {
-                os << ", ";
-            }
-            first = false;
-            os << a.name << "(";
-            switch (a.type) {
-                case ArgType::Number: os << "number"; break;
-                case ArgType::String: os << "string"; break;
-                case ArgType::Bool:   os << "bool"; break;
-                case ArgType::Ref:    os << "ref:" << a.ref_kind; break;
-            }
-            if (a.has_range) {
-                os << ", " << a.min << "~" << a.max;
-            }
-            os << (!a.required ? ", 可选" : "");
-            os << ")";
-        }
+        append_args(os, cmd.args);
         if (!cmd.preconditions.empty()) {
             os << "\n  前置条件：" << cmd.preconditions.front();
         }
@@ -199,6 +207,10 @@ std::string render_library_prompt(const ComponentLibrary& lib,
             if (c != nullptr && !c->summary.empty()) {
                 os << "：" << c->summary;
             }
+            if (c != nullptr) {
+                os << "\n  参数：";
+                append_args(os, c->params);
+            }
             os << "\n";
         }
     }
@@ -208,6 +220,8 @@ std::string render_library_prompt(const ComponentLibrary& lib,
     os << "2. 数组元素形如 {\"op\":\"create_circle\",\"args\":{...}}。\n";
     os << "3. 第一条必须是 create_canvas。\n";
     os << "4. 画布默认 400x400，中心在 (200,200)。\n";
+    os << "5. 会被其它指令引用的对象要带 id（如 {\"id\":\"c1\",\"op\":\"create_circle\",...}），"
+          "create_connect 用 from/to 填这个 id。\n";
     return os.str();
 }
 
