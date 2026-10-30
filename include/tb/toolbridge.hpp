@@ -139,6 +139,8 @@ private:
     std::string bg_ = "#ffffff";
     std::string body_;
     std::size_t elements_ = 0;
+    // 已创建对象的中心坐标（按 id 记录），供 create_connect 引用
+    std::map<std::string, std::pair<double, double>> centers_;
 };
 
 // 显示建模组件库（canvas / circle / line / text / hand / connect）

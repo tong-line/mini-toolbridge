@@ -1,0 +1,6 @@
+[
+  {"op":"create_canvas","args":{"width":400,"height":400,"bg":"#f7f7fa"}},
+  {"id":"c1","op":"create_circle","args":{"cx":120,"cy":200,"r":60,"stroke":"#1f3b66","fill":"none"}},
+  {"id":"c2","op":"create_circle","args":{"cx":280,"cy":200,"r":60,"stroke":"#1f3b66","fill":"none"}},
+  {"op":"create_connect","args":{"from":"c1","to":"c2","stroke":"#c0392b","width":3}}
+]

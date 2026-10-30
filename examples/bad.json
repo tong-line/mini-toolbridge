@@ -2,5 +2,6 @@
   {"op":"create_canvas","args":{"width":400,"height":400}},
   {"op":"create_circle","args":{"cx":200,"cy":200,"r":"一百"}},
   {"op":"melt","args":{}},
-  {"op":"create_hand","args":{"angle":45,"length":100,"width":99}}
+  {"op":"create_hand","args":{"angle":45,"length":100,"width":99}},
+  {"op":"create_connect","args":{"from":"ghost","to":"also_ghost"}}
 ]

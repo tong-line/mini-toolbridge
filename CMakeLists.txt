@@ -30,8 +30,12 @@ target_link_libraries(tb PRIVATE tb_core)
 add_executable(stream_selftest tests/stream_selftest.cpp)
 target_link_libraries(stream_selftest PRIVATE tb_core)
 
+add_executable(validate_selftest tests/validate_selftest.cpp)
+target_link_libraries(validate_selftest PRIVATE tb_core)
+
 enable_testing()
 add_test(NAME stream_selftest COMMAND stream_selftest)
+add_test(NAME validate_selftest COMMAND validate_selftest)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(tb PRIVATE -Wall -Wextra -Wpedantic)

@@ -284,6 +284,7 @@ void SvgExecutor::begin(double width, double height, const std::string& bg) {
     w_ = width;
     h_ = height;
     bg_ = bg;
+    centers_.clear();
     open_ = true;
 }
 
@@ -308,15 +309,19 @@ bool SvgExecutor::execute(const Instruction& ins) {
         return false;
     }
     if (ins.op == "create_circle") {
+        const double cx = a.at("cx").to_number<double>();
+        const double cy = a.at("cy").to_number<double>();
         std::ostringstream os;
-        os << "<circle cx=\"" << num(a.at("cx").to_number<double>()) << "\" cy=\""
-           << num(a.at("cy").to_number<double>()) << "\" r=\"" << num(a.at("r").to_number<double>())
-           << "\" fill=\""
+        os << "<circle cx=\"" << num(cx) << "\" cy=\"" << num(cy) << "\" r=\""
+           << num(a.at("r").to_number<double>()) << "\" fill=\""
            << (a.contains("fill") ? std_str(a.at("fill").as_string()) : "none") << "\" stroke=\""
            << (a.contains("stroke") ? std_str(a.at("stroke").as_string()) : "#1f3b66")
            << "\" stroke-width=\""
            << (a.contains("width") ? a.at("width").to_number<double>() : 2.0) << "\"/>";
         emit(os.str());
+        if (!ins.id.empty()) {
+            centers_[ins.id] = {cx, cy};   // 供后续 create_connect 引用
+        }
         return true;
     }
     if (ins.op == "create_line") {
@@ -326,6 +331,33 @@ bool SvgExecutor::execute(const Instruction& ins) {
            << num(a.at("x2").to_number<double>()) << "\" y2=\""
            << num(a.at("y2").to_number<double>()) << "\" stroke=\""
            << (a.contains("stroke") ? std_str(a.at("stroke").as_string()) : "#1f3b66")
+           << "\" stroke-width=\""
+           << (a.contains("width") ? a.at("width").to_number<double>() : 2.0)
+           << "\" stroke-linecap=\"round\"/>";
+        emit(os.str());
+        return true;
+    }
+    if (ins.op == "create_connect") {
+        auto resolve = [this](const boost::json::value& ref_value)
+            -> std::optional<std::pair<double, double>> {
+            const std::string ref = std_str(ref_value.as_string());
+            const std::string object_id = ref.substr(0, ref.find('.'));
+            const auto it = centers_.find(object_id);
+            if (it == centers_.end()) {
+                return std::nullopt;
+            }
+            return it->second;
+        };
+        const auto from = resolve(a.at("from"));
+        const auto to = resolve(a.at("to"));
+        if (!from || !to) {
+            return false;   // 正常流程里 check_preconditions 已拦截
+        }
+        std::ostringstream os;
+        os << "<line x1=\"" << num(from->first) << "\" y1=\"" << num(from->second)
+           << "\" x2=\"" << num(to->first) << "\" y2=\"" << num(to->second)
+           << "\" stroke=\""
+           << (a.contains("stroke") ? std_str(a.at("stroke").as_string()) : "#c0392b")
            << "\" stroke-width=\""
            << (a.contains("width") ? a.at("width").to_number<double>() : 2.0)
            << "\" stroke-linecap=\"round\"/>";
@@ -433,6 +465,19 @@ ComponentLibrary make_display_library() {
     text.preconditions = {"canvas_exists"};
     lib.add(text);
 
+    Command connect;
+    connect.name = "create_connect";
+    connect.category = "shape";
+    connect.summary = "用线段连接两个已创建对象的中心（对象需先创建且带 id）";
+    connect.args = {
+        {"from", ArgType::Ref, true, 0, 0, false, "object"},
+        {"to", ArgType::Ref, true, 0, 0, false, "object"},
+        {"width", ArgType::Number, false, 0.1, 64, true, ""},
+        {"stroke", ArgType::String, false, 0, 0, false, ""},
+    };
+    connect.preconditions = {"canvas_exists"};
+    lib.add(connect);
+
     Command hand;
     hand.name = "create_hand";
     hand.category = "shape";
@@ -532,12 +577,22 @@ PipelineStats run_instructions(const std::string& json_text, const ComponentLibr
             continue;
         }
 
-        // 2) 当组合件
+        // 2) 当组合件。走到这里说明 validate 已失败，result 必为 ValidationError
+        const auto* err = std::get_if<ValidationError>(&result);
+        if (!item.is_object()) {
+            stats.errors.push_back(err->describe());
+            ++stats.rejected;
+            continue;
+        }
         const auto& obj = item.as_object();
+        if (!obj.contains("op") || !obj.at("op").is_string()) {
+            stats.errors.push_back(err->describe());
+            ++stats.rejected;
+            continue;
+        }
         const std::string op = std_str(obj.at("op").as_string());
         const CompositeComponent* comp = composites.find(op);
         if (comp == nullptr) {
-            const auto* err = std::get_if<ValidationError>(&result);
             stats.errors.push_back(err->describe());
             ++stats.rejected;
             continue;
