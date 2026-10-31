@@ -281,5 +281,5 @@ mini-toolbridge/
 if (ins.op == "create_circle") { ... }
 ```
 
-换成 VAPS / FreeCAD / Unity，只改这一个类，**组件库、校验、LLM 接入、CLI 全都不用动**。
+换成 FreeCAD / Unity / 或自研建模软件，只改这一个类，**组件库、校验、LLM 接入、CLI 全都不用动**。
 这就是分层的意义 —— 也是这个项目能声称"设计可迁移"的依据。
