@@ -7,6 +7,7 @@
 //   tb ask --stream --url URL        **流式**：边收边校验边执行
 //   tb mock-llm [--port N]           本地模拟 SSE 服务，无需 API key
 
+#include "tb/mcp.hpp"
 #include "tb/net.hpp"
 #include "tb/stream.hpp"
 #include "tb/toolbridge.hpp"
@@ -69,7 +70,8 @@ void usage() {
         "  tb render <file.json> [-o out]    校验并渲染\n"
         "  tb ask \"<需求>\" [-o out]          走大模型（同步）\n"
         "  tb ask --stream --url <URL>       流式：边收边校验边执行\n"
-        "  tb mock-llm [--port N]            本地 mock SSE 服务（默认 8081）\n\n"
+        "  tb mock-llm [--port N]            本地 mock SSE 服务（默认 8081）\n"
+        "  tb mcp                            MCP stdio 服务端（给 Claude Desktop 等用）\n\n"
         "环境变量（在线时）：TB_API_BASE / TB_API_KEY / TB_MODEL\n");
 }
 
@@ -114,6 +116,11 @@ int main(int argc, char** argv) {
     ComponentLibrary lib = make_display_library();
     CompositeRegistry composites;
     composites.add(make_gear_component());
+
+    if (cmd == "mcp") {
+        run_mcp_stdio();
+        return 0;
+    }
 
     if (cmd == "library") {
         std::printf("%s", render_library_prompt(lib, composites).c_str());

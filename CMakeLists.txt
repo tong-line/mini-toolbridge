@@ -16,6 +16,7 @@ add_library(tb_core STATIC
     src/llm.cpp
     src/stream.cpp
     src/net_stream.cpp
+    src/mcp_server.cpp
 )
 target_include_directories(tb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tb_core PUBLIC Boost::json Boost::system OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
@@ -33,8 +34,12 @@ target_link_libraries(stream_selftest PRIVATE tb_core)
 add_executable(validate_selftest tests/validate_selftest.cpp)
 target_link_libraries(validate_selftest PRIVATE tb_core)
 
+add_executable(mcp_selftest tests/mcp_selftest.cpp)
+target_link_libraries(mcp_selftest PRIVATE tb_core)
+
 enable_testing()
 add_test(NAME stream_selftest COMMAND stream_selftest)
+add_test(NAME mcp_selftest COMMAND mcp_selftest)
 add_test(NAME validate_selftest COMMAND validate_selftest)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

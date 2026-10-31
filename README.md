@@ -141,6 +141,43 @@ create_gear(cx, cy, r, teeth)
 
 ---
 
+## MCP 服务端（兼容 Claude Desktop 等客户端）
+
+```bash
+./build/tb mcp        # 启动 stdio 服务端
+```
+
+三个工具直接映射组件库：
+
+| 工具 | 作用 |
+|---|---|
+| `list_components` | 返回全部指令与参数 schema |
+| `validate_instructions` | 只校验，不产生产物 |
+| `render_instructions` | 校验 + 执行 + 写出 SVG |
+
+接入 Claude Desktop，编辑 `claude_desktop_config.json`（见 `examples/claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "mini-toolbridge": {
+      "command": "/绝对路径/mini-toolbridge/build/tb",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+重启客户端后即可让它「画一个 8 齿齿轮」。
+
+**协议实现要点**：
+
+- 传输是**换行分隔的 JSON-RPC 2.0**（不是 LSP 的 Content-Length 分帧）
+- `stdout` 只写协议消息，日志一律走 `stderr`（否则客户端解析失败）
+- 通知（无 `id`）不回复
+- `initialize` 回显客户端请求的 `protocolVersion`，客户端不支持时自行降级
+- 工具执行失败返回 `isError: true` 的**结果**，而不是 JSON-RPC error（协议约定）
+
 ## 流式链路（这块是技术重点）
 
 LLM 是流式返回的。等完整回复再解析有两个浪费：首字节延迟 = 全量延迟；模型生成了 2000 token 废话时，你要等完才发现前几个字就错了。
@@ -210,8 +247,11 @@ mini-toolbridge/
 ├── src/stream.cpp              SseParser / InstructionScanner
 ├── src/net_stream.cpp          协程 HTTP 客户端（http/https）+ mock LLM
 ├── src/llm.cpp                 ILlmProvider + prompt 渲染 + 回复解析
-├── apps/tb.cpp                 CLI：library / validate / render / ask / mock-llm
+├── include/tb/mcp.hpp          MCP 服务端接口
+├── src/mcp_server.cpp          JSON-RPC 分发 + 三个工具
+├── apps/tb.cpp                 CLI：library / validate / render / ask / mock-llm / mcp
 ├── tests/stream_selftest.cpp   SSE 切包 + 增量提取自测
+├── tests/mcp_selftest.cpp      MCP 协议层自测（8 组断言）
 ├── tests/validate_selftest.cpp 七层校验 + 管道健壮性自测
 ├── examples/                   clock.json / gear.json / refs.json / bad.json
 └── docs/design.md              设计还原与面试问答

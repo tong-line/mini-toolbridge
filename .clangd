@@ -1,0 +1,3 @@
+# 供 clangd 使用：指到 CMake 生成的编译数据库
+CompileFlags:
+  CompilationDatabase: build

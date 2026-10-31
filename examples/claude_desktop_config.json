@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mini-toolbridge": {
+      "command": "/Users/tongzhaolin/json-tutorial/mini-toolbridge/build/tb",
+      "args": ["mcp"],
+      "cwd": "/Users/tongzhaolin/json-tutorial/mini-toolbridge"
+    }
+  }
+}
