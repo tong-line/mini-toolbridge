@@ -40,3 +40,33 @@ jobs:
           sleep 1
           ./build/tb ask "画一个钟表" --stream --url http://127.0.0.1:8081/v1/chat/completions -o /tmp/clock.svg
           kill %1
+
+  asan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-json-dev libssl-dev
+      - name: 配置（ASan + UBSan）
+        run: cmake -S . -B build-asan -DTB_SANITIZE=ON
+      - name: 构建
+        run: cmake --build build-asan -j
+      - name: 自测
+        run: ctest --test-dir build-asan --output-on-failure
+
+  tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-json-dev libssl-dev
+      - name: 配置（TSan）
+        run: cmake -S . -B build-tsan -DTB_SANITIZE_THREAD=ON
+      - name: 构建
+        run: cmake --build build-tsan -j
+      - name: 自测
+        run: ctest --test-dir build-tsan --output-on-failure

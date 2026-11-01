@@ -5,6 +5,7 @@
 #include "tb/toolbridge.hpp"
 
 #include <cstdio>
+#include <string>
 #include <variant>
 
 namespace {
@@ -150,6 +151,44 @@ int main() {
             "{\"op\":\"create_connect\",\"args\":{\"from\":\"c1\",\"to\":\"c2\"}}]",
             lib, {}, ctx, svg);
         check(stats.applied == 4 && stats.rejected == 0, "引用链端到端执行成功");
+    }
+
+    // 13) 组合件无画布：阶段 1 在副本上失败，产物为空
+    {
+        tb::ModelContext ctx;
+        tb::SvgExecutor svg;
+        tb::CompositeRegistry composites;
+        composites.add(tb::make_gear_component());
+        const tb::PipelineStats stats = tb::run_instructions(
+            "[{\"op\":\"create_gear\",\"args\":{\"cx\":200,\"cy\":200,\"r\":150,\"teeth\":8}}]",
+            lib, composites, ctx, svg);
+        check(stats.applied == 0 && stats.rejected == 1, "无画布时组合件被拒");
+        check(svg.element_count() == 0, "失败的组合件不写产物");
+        check(!stats.errors.empty() && stats.errors.front().find("组合件展开后不合法") != std::string::npos,
+              "错误指向展开后的前置条件");
+    }
+
+    // 14) 组合件展开出未知指令：阶段 1 拦住，不执行
+    {
+        tb::ModelContext ctx;
+        tb::SvgExecutor svg;
+        tb::CompositeRegistry composites;
+        tb::CompositeComponent bad;
+        bad.name = "create_bad";
+        bad.params = {};
+        bad.expand = [](const boost::json::object&) {
+            tb::Instruction ins;
+            ins.op = "melt";
+            return tb::Expansion{ins};
+        };
+        composites.add(std::move(bad));
+        const tb::PipelineStats stats = tb::run_instructions(
+            "[{\"op\":\"create_canvas\",\"args\":{\"width\":200,\"height\":200}},"
+            "{\"op\":\"create_bad\",\"args\":{}}]",
+            lib, composites, ctx, svg);
+        check(stats.applied == 1 && stats.rejected == 1, "坏组合件被拒，画布仍成功");
+        check(!stats.errors.empty() && stats.errors.front().find("未知指令") != std::string::npos,
+              "展开后的 melt 被结构层拦住");
     }
 
     std::printf(failures == 0 ? "PASS\n" : "FAIL（%d 处失败）\n", failures);

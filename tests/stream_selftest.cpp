@@ -51,6 +51,24 @@ int main() {
     }
 
     const bool ok = found.size() == 3;
-    std::printf("%s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
+    std::printf("切包提取: %s\n", ok ? "PASS" : "FAIL");
+
+    // compact：已吐出的对象从缓冲区丢掉，长流下占用保持有界
+    tb::InstructionScanner long_scan;
+    std::string many;
+    many.reserve(80 * 200);
+    for (int i = 0; i < 200; ++i) {
+        many += R"({"op":"create_circle","args":{"cx":1,"cy":1,"r":1}})";
+        many += ',';
+    }
+    const auto extracted = long_scan.feed(many);
+    const bool compact_ok = extracted.size() == 200 && long_scan.buffered() < 64 &&
+                            long_scan.total_chars() == many.size();
+    std::printf("提取 %zu 条，buffered=%zu，total=%zu\n", extracted.size(), long_scan.buffered(),
+                long_scan.total_chars());
+    std::printf("compact 有界: %s\n", compact_ok ? "PASS" : "FAIL");
+
+    const bool pass = ok && compact_ok;
+    std::printf("%s\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
 }

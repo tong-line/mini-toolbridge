@@ -1,6 +1,5 @@
 #include "tb/toolbridge.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <sstream>
@@ -72,101 +71,9 @@ Instruction make_instruction(std::string op, boost::json::object args) {
     return ins;
 }
 
-}  // namespace
-
-// ============================================================ 组件库
-
-void ComponentLibrary::add(Command cmd) { commands_[cmd.name] = std::move(cmd); }
-
-const Command* ComponentLibrary::find(std::string_view name) const {
-    auto it = commands_.find(name);
-    return it == commands_.end() ? nullptr : &it->second;
-}
-
-std::vector<std::string> ComponentLibrary::names() const {
-    std::vector<std::string> out;
-    out.reserve(commands_.size());
-    for (const auto& [k, _] : commands_) {
-        out.push_back(k);
-    }
-    return out;
-}
-
-// ============================================================ 校验
-
-std::string_view layer_name(Layer layer) {
-    switch (layer) {
-        case Layer::Syntax:    return "语法";
-        case Layer::Structure: return "结构";
-        case Layer::Type:      return "类型";
-        case Layer::Required:  return "必填";
-        case Layer::Range:     return "范围";
-        case Layer::Reference: return "引用";
-        case Layer::Order:     return "顺序";
-    }
-    return "未知";
-}
-
-std::string ValidationError::describe() const {
-    std::ostringstream os;
-    os << "[" << layer_name(layer) << "] ";
-    if (!path.empty()) {
-        os << path << ": ";
-    }
-    os << message;
-    return os.str();
-}
-
-void ModelContext::add_object(std::string id) { objects_.push_back(std::move(id)); }
-void ModelContext::add_kind(std::string kind) { kinds_.push_back(std::move(kind)); }
-
-bool ModelContext::has_object(std::string_view id) const {
-    return std::find(objects_.begin(), objects_.end(), id) != objects_.end();
-}
-bool ModelContext::has_kind(std::string_view kind) const {
-    return std::find(kinds_.begin(), kinds_.end(), kind) != kinds_.end();
-}
-
-ParseResult parse(std::string_view text) {
-    boost::json::error_code ec;
-    boost::json::value v = boost::json::parse(text, ec);
-    if (ec) {
-        return ValidationError{Layer::Syntax, "", ec.message()};
-    }
-    return v;
-}
-
-ValidateResult validate(const boost::json::value& doc, const ComponentLibrary& library) {
-    if (!doc.is_object()) {
-        return ValidationError{Layer::Structure, "$", "顶层必须是一个 JSON object"};
-    }
-    const auto& obj = doc.as_object();
-
-    if (!obj.contains("op") || !obj.at("op").is_string()) {
-        return ValidationError{Layer::Structure, "op", "缺少字符串字段 op"};
-    }
-    const std::string op = std_str(obj.at("op").as_string());
-
-    const Command* cmd = library.find(op);
-    if (cmd == nullptr) {
-        return ValidationError{Layer::Structure, "op",
-                               "未知指令: " + op + "；可用指令: " + join(library.names())};
-    }
-
-    if (!obj.contains("args") || !obj.at("args").is_object()) {
-        return ValidationError{Layer::Structure, "args", "缺少 object 字段 args"};
-    }
-    const auto& args = obj.at("args").as_object();
-
-    std::string id;
-    if (obj.contains("id")) {
-        if (!obj.at("id").is_string()) {
-            return ValidationError{Layer::Type, "id", "id 必须是字符串"};
-        }
-        id = std_str(obj.at("id").as_string());
-    }
-
-    for (const auto& declared : cmd->args) {
+std::optional<ValidationError> check_args(const Instruction& ins, const Command& cmd) {
+    const auto& args = ins.args;
+    for (const auto& declared : cmd.args) {
         const std::string path = "args." + declared.name;
         if (!args.contains(declared.name)) {
             if (declared.required) {
@@ -220,9 +127,9 @@ ValidateResult validate(const boost::json::value& doc, const ComponentLibrary& l
     }
 
     for (const auto& [k, _] : args) {
-        if (find_arg(*cmd, k) == nullptr) {
+        if (find_arg(cmd, k) == nullptr) {
             std::vector<std::string> allowed;
-            for (const auto& a : cmd->args) {
+            for (const auto& a : cmd.args) {
                 allowed.push_back(a.name);
             }
             return ValidationError{Layer::Structure, "args." + std::string(k),
@@ -230,8 +137,166 @@ ValidateResult validate(const boost::json::value& doc, const ComponentLibrary& l
                                        "；可用参数: " + join(allowed)};
         }
     }
+    return std::nullopt;
+}
 
-    return Instruction{id, op, args};
+void commit_context(const Instruction& ins, ModelContext& ctx) {
+    if (ins.op == "create_canvas") {
+        ctx.add_kind("canvas");
+    }
+    if (!ins.id.empty()) {
+        ctx.add_object(ins.id);
+    }
+}
+
+ApplyOutcome fail_outcome(std::string error, std::string op = {}, bool composite = false) {
+    ApplyOutcome o;
+    o.ok = false;
+    o.is_composite = composite;
+    o.op = std::move(op);
+    o.error = std::move(error);
+    return o;
+}
+
+}  // namespace
+
+// ============================================================ 组件库
+
+void ComponentLibrary::add(Command cmd) { commands_[cmd.name] = std::move(cmd); }
+
+const Command* ComponentLibrary::find(std::string_view name) const {
+    auto it = commands_.find(name);
+    return it == commands_.end() ? nullptr : &it->second;
+}
+
+std::vector<std::string> ComponentLibrary::names() const {
+    std::vector<std::string> out;
+    out.reserve(commands_.size());
+    for (const auto& [k, _] : commands_) {
+        out.push_back(k);
+    }
+    return out;
+}
+
+// ============================================================ 校验
+
+std::string_view layer_name(Layer layer) {
+    switch (layer) {
+        case Layer::Syntax:    return "语法";
+        case Layer::Structure: return "结构";
+        case Layer::Type:      return "类型";
+        case Layer::Required:  return "必填";
+        case Layer::Range:     return "范围";
+        case Layer::Reference: return "引用";
+        case Layer::Order:     return "顺序";
+    }
+    return "未知";
+}
+
+std::string ValidationError::describe() const {
+    std::ostringstream os;
+    os << "[" << layer_name(layer) << "] ";
+    if (!path.empty()) {
+        os << path << ": ";
+    }
+    os << message;
+    return os.str();
+}
+
+ModelContext::ModelContext(const ModelContext& other) {
+    kinds_.reserve(other.kinds_.size());
+    objects_.reserve(other.objects_.size());
+    for (auto k : other.kinds_) {
+        kinds_.insert(arena_.intern(k));
+    }
+    for (auto id : other.objects_) {
+        objects_.insert(arena_.intern(id));
+    }
+}
+
+ModelContext& ModelContext::operator=(const ModelContext& other) {
+    if (this == &other) {
+        return *this;
+    }
+    ModelContext tmp(other);
+    *this = std::move(tmp);
+    return *this;
+}
+
+void ModelContext::add_object(std::string_view id) {
+    if (id.empty() || has_object(id)) {
+        return;
+    }
+    objects_.insert(arena_.intern(id));
+}
+void ModelContext::add_kind(std::string_view kind) {
+    if (kind.empty() || has_kind(kind)) {
+        return;
+    }
+    kinds_.insert(arena_.intern(kind));
+}
+
+bool ModelContext::has_object(std::string_view id) const {
+    return objects_.find(id) != objects_.end();
+}
+bool ModelContext::has_kind(std::string_view kind) const {
+    return kinds_.find(kind) != kinds_.end();
+}
+
+ParseResult parse(std::string_view text) {
+    boost::json::error_code ec;
+    boost::json::value v = boost::json::parse(text, ec);
+    if (ec) {
+        return ValidationError{Layer::Syntax, "", ec.message()};
+    }
+    return v;
+}
+
+ValidateResult validate(const boost::json::value& doc, const ComponentLibrary& library) {
+    if (!doc.is_object()) {
+        return ValidationError{Layer::Structure, "$", "顶层必须是一个 JSON object"};
+    }
+    const auto& obj = doc.as_object();
+
+    if (!obj.contains("op") || !obj.at("op").is_string()) {
+        return ValidationError{Layer::Structure, "op", "缺少字符串字段 op"};
+    }
+    const std::string op = std_str(obj.at("op").as_string());
+
+    const Command* cmd = library.find(op);
+    if (cmd == nullptr) {
+        return ValidationError{Layer::Structure, "op",
+                               "未知指令: " + op + "；可用指令: " + join(library.names())};
+    }
+
+    if (!obj.contains("args") || !obj.at("args").is_object()) {
+        return ValidationError{Layer::Structure, "args", "缺少 object 字段 args"};
+    }
+    const auto& args = obj.at("args").as_object();
+
+    std::string id;
+    if (obj.contains("id")) {
+        if (!obj.at("id").is_string()) {
+            return ValidationError{Layer::Type, "id", "id 必须是字符串"};
+        }
+        id = std_str(obj.at("id").as_string());
+    }
+
+    Instruction ins{id, op, args};
+    if (auto e = check_args(ins, *cmd)) {
+        return *e;
+    }
+    return ins;
+}
+
+std::optional<ValidationError> validate_instruction(const Instruction& ins,
+                                                    const ComponentLibrary& library) {
+    const Command* cmd = library.find(ins.op);
+    if (cmd == nullptr) {
+        return ValidationError{Layer::Structure, "op",
+                               "未知指令: " + ins.op + "；可用指令: " + join(library.names())};
+    }
+    return check_args(ins, *cmd);
 }
 
 std::optional<ValidationError> check_preconditions(const Instruction& ins,
@@ -535,6 +600,88 @@ CompositeComponent make_gear_component() {
 
 // ============================================================ 管道
 
+ApplyOutcome apply_one(const boost::json::value& item, const ComponentLibrary& lib,
+                       const CompositeRegistry& composites, ModelContext& ctx, SvgExecutor& out) {
+    auto result = validate(item, lib);
+    if (auto* ins = std::get_if<Instruction>(&result)) {
+        if (auto e = check_preconditions(*ins, lib, ctx)) {
+            return fail_outcome(e->describe(), ins->op);
+        }
+        if (!out.execute(*ins)) {
+            return fail_outcome("[执行] 执行器不认识 " + ins->op, ins->op);
+        }
+        commit_context(*ins, ctx);
+        ApplyOutcome ok;
+        ok.ok = true;
+        ok.op = ins->op;
+        return ok;
+    }
+
+    const auto* err = std::get_if<ValidationError>(&result);
+    if (!item.is_object()) {
+        return fail_outcome(err->describe());
+    }
+    const auto& obj = item.as_object();
+    if (!obj.contains("op") || !obj.at("op").is_string()) {
+        return fail_outcome(err->describe());
+    }
+    const std::string op = std_str(obj.at("op").as_string());
+    const CompositeComponent* comp = composites.find(op);
+    if (comp == nullptr) {
+        return fail_outcome(err->describe(), op);
+    }
+
+    ComponentLibrary probe;
+    Command wrapper;
+    wrapper.name = op;
+    wrapper.args = comp->params;
+    probe.add(wrapper);
+
+    auto probe_result = validate(item, probe);
+    if (auto* perr = std::get_if<ValidationError>(&probe_result)) {
+        return fail_outcome("组合件参数不合法: " + perr->describe(), op, true);
+    }
+
+    const auto& args = obj.at("args").as_object();
+    const Expansion expansion = comp->expand(args);
+
+    // 阶段 1：在上下文副本上证明每条子指令都合法。失败则产物与 ctx 都不动。
+    ModelContext simulated = ctx;
+    for (const auto& sub : expansion) {
+        if (auto e = validate_instruction(sub, lib)) {
+            return fail_outcome("组合件展开后不合法: " + e->describe(), op, true);
+        }
+        if (auto e = check_preconditions(sub, lib, simulated)) {
+            return fail_outcome("组合件展开后不合法: " + e->describe(), op, true);
+        }
+        commit_context(sub, simulated);
+    }
+
+    // 阶段 2：执行。前置条件已证明，执行器仍可能因内部状态失败。
+    for (const auto& sub : expansion) {
+        if (!out.execute(sub)) {
+            return fail_outcome("[执行] 展开出的 " + sub.op + " 失败", op, true);
+        }
+        commit_context(sub, ctx);
+    }
+
+    ApplyOutcome ok;
+    ok.ok = true;
+    ok.is_composite = true;
+    ok.op = op;
+    return ok;
+}
+
+ApplyOutcome apply_one_text(std::string_view text, const ComponentLibrary& lib,
+                            const CompositeRegistry& composites, ModelContext& ctx,
+                            SvgExecutor& out) {
+    auto parsed = parse(text);
+    if (auto* e = std::get_if<ValidationError>(&parsed)) {
+        return fail_outcome(e->describe());
+    }
+    return apply_one(std::get<boost::json::value>(parsed), lib, composites, ctx, out);
+}
+
 PipelineStats run_instructions(const std::string& json_text, const ComponentLibrary& lib,
                                const CompositeRegistry& composites, ModelContext& ctx,
                                SvgExecutor& out) {
@@ -554,77 +701,12 @@ PipelineStats run_instructions(const std::string& json_text, const ComponentLibr
     }
 
     for (const auto& item : doc.as_array()) {
-        // 1) 当基础指令
-        auto result = validate(item, lib);
-        if (auto* ins = std::get_if<Instruction>(&result)) {
-            if (auto e = check_preconditions(*ins, lib, ctx)) {
-                stats.errors.push_back(e->describe());
-                ++stats.rejected;
-                continue;
-            }
-            if (!out.execute(*ins)) {
-                stats.errors.push_back("[执行] 执行器不认识 " + ins->op);
-                ++stats.rejected;
-                continue;
-            }
-            if (ins->op == "create_canvas") {
-                ctx.add_kind("canvas");
-            }
-            if (!ins->id.empty()) {
-                ctx.add_object(ins->id);
-            }
+        const ApplyOutcome outcome = apply_one(item, lib, composites, ctx, out);
+        if (outcome.ok) {
             ++stats.applied;
-            continue;
-        }
-
-        // 2) 当组合件。走到这里说明 validate 已失败，result 必为 ValidationError
-        const auto* err = std::get_if<ValidationError>(&result);
-        if (!item.is_object()) {
-            stats.errors.push_back(err->describe());
+        } else {
             ++stats.rejected;
-            continue;
-        }
-        const auto& obj = item.as_object();
-        if (!obj.contains("op") || !obj.at("op").is_string()) {
-            stats.errors.push_back(err->describe());
-            ++stats.rejected;
-            continue;
-        }
-        const std::string op = std_str(obj.at("op").as_string());
-        const CompositeComponent* comp = composites.find(op);
-        if (comp == nullptr) {
-            stats.errors.push_back(err->describe());
-            ++stats.rejected;
-            continue;
-        }
-
-        // 复用校验：临时把组合件当作一条命令
-        ComponentLibrary probe;
-        Command wrapper;
-        wrapper.name = op;
-        wrapper.args = comp->params;
-        probe.add(wrapper);
-
-        auto probe_result = validate(item, probe);
-        if (auto* err = std::get_if<ValidationError>(&probe_result)) {
-            stats.errors.push_back("组合件参数不合法: " + err->describe());
-            ++stats.rejected;
-            continue;
-        }
-
-        const auto& args = obj.at("args").as_object();
-        const Expansion expansion = comp->expand(args);
-        bool failed = false;
-        for (const auto& sub : expansion) {
-            if (!out.execute(sub)) {
-                stats.errors.push_back("[执行] 展开出的 " + sub.op + " 失败");
-                ++stats.rejected;
-                failed = true;
-                break;
-            }
-        }
-        if (!failed) {
-            ++stats.applied;
+            stats.errors.push_back(outcome.error);
         }
     }
 

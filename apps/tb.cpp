@@ -9,6 +9,7 @@
 
 #include "tb/mcp.hpp"
 #include "tb/net.hpp"
+#include "tb/pipeline.hpp"
 #include "tb/stream.hpp"
 #include "tb/toolbridge.hpp"
 
@@ -244,9 +245,6 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             double first_instruction_ms = -1.0;
             int extracted = 0;
-            int applied = 0;
-            int rejected = 0;
-            std::vector<std::string> errors;
 
             auto elapsed_ms = [&]() {
                 return std::chrono::duration<double, std::milli>(
@@ -254,44 +252,24 @@ int main(int argc, char** argv) {
                     .count();
             };
 
-            // 每抠出一条完整指令，立刻校验并执行
-            auto handle_instruction = [&](const std::string& ins_text) {
+            InstructionPipeline::Config pcfg;
+            pcfg.queue_capacity = 8;
+            pcfg.on_applied = [&](std::string_view op) {
+                std::printf("  + [%6.1f ms] %s\n", elapsed_ms(), std::string(op).c_str());
+                std::fflush(stdout);
+            };
+            InstructionPipeline pipe(lib, composites, ctx, svg, std::move(pcfg));
+
+            // 扫描线程（asio 回调）只负责入队；校验/执行在 worker 上。
+            // 队列满则阻塞反压；worker 失败则 submit 返回 false，断开连接。
+            auto handle_instruction = [&](std::string ins_text) {
                 ++extracted;
                 if (first_instruction_ms < 0) {
                     first_instruction_ms = elapsed_ms();
                 }
-                auto parsed = parse(ins_text);
-                if (auto* e = std::get_if<ValidationError>(&parsed)) {
-                    errors.push_back(e->describe());
-                    ++rejected;
+                if (!pipe.submit(std::move(ins_text))) {
                     throw AbortStream{};
                 }
-                auto result = validate(std::get<boost::json::value>(parsed), lib);
-                if (auto* e = std::get_if<ValidationError>(&result)) {
-                    errors.push_back(e->describe());
-                    ++rejected;
-                    throw AbortStream{};
-                }
-                const Instruction& ins = std::get<Instruction>(result);
-                if (auto e = check_preconditions(ins, lib, ctx)) {
-                    errors.push_back(e->describe());
-                    ++rejected;
-                    throw AbortStream{};
-                }
-                if (!svg.execute(ins)) {
-                    errors.push_back("[执行] 不认识的指令 " + ins.op);
-                    ++rejected;
-                    throw AbortStream{};
-                }
-                if (ins.op == "create_canvas") {
-                    ctx.add_kind("canvas");
-                }
-                if (!ins.id.empty()) {
-                    ctx.add_object(ins.id);
-                }
-                ++applied;
-                std::printf("  + [%6.1f ms] %s\n", elapsed_ms(), ins.op.c_str());
-                std::fflush(stdout);
             };
 
             auto on_chunk = [&](std::string_view bytes) {
@@ -303,8 +281,8 @@ int main(int argc, char** argv) {
                     if (delta.empty()) {
                         continue;
                     }
-                    for (const auto& ins_text : scanner.feed(delta)) {
-                        handle_instruction(ins_text);
+                    for (auto& ins_text : scanner.feed(delta)) {
+                        handle_instruction(std::move(ins_text));
                     }
                 }
             };
@@ -334,14 +312,19 @@ int main(int argc, char** argv) {
                     if (delta.empty()) {
                         continue;
                     }
-                    for (const auto& ins_text : scanner.feed(delta)) {
+                    for (auto& ins_text : scanner.feed(delta)) {
                         try {
-                            handle_instruction(ins_text);
+                            handle_instruction(std::move(ins_text));
                         } catch (const AbortStream&) {
                             aborted = true;
                         }
                     }
                 }
+            }
+
+            const PipelineStats stats = pipe.finish();
+            if (pipe.failed()) {
+                aborted = true;
             }
 
             const double total_ms = elapsed_ms();
@@ -355,8 +338,9 @@ int main(int argc, char** argv) {
             }
             std::printf("首条指令可用: %.1f ms\n", first_instruction_ms);
             std::printf("全部完成:     %.1f ms\n", total_ms);
-            std::printf("提取 %d 条，执行 %d 条，被拒 %d 条\n", extracted, applied, rejected);
-            for (const auto& e : errors) {
+            std::printf("提取 %d 条，执行 %d 条，被拒 %d 条\n", extracted, stats.applied,
+                        stats.rejected);
+            for (const auto& e : stats.errors) {
                 std::printf("  ✗ %s\n", e.c_str());
             }
             if (!write_file(out_path, svg.document())) {
@@ -364,7 +348,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::printf("产物: %s（%zu 个元素）\n", out_path.c_str(), svg.element_count());
-            return rejected == 0 ? 0 : 2;
+            return stats.rejected == 0 ? 0 : 2;
         }
 
         // ================= 同步分支 =================

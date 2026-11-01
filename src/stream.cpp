@@ -71,9 +71,24 @@ std::vector<std::string> SseParser::flush() {
 
 // ============================================================ 增量指令提取
 
+void InstructionScanner::compact() {
+    const std::size_t keep_from = (depth_ > 0) ? obj_start_ : pos_;
+    if (keep_from == 0) {
+        return;
+    }
+    buf_.erase(0, keep_from);
+    pos_ -= keep_from;
+    if (obj_start_ >= keep_from) {
+        obj_start_ -= keep_from;
+    } else {
+        obj_start_ = 0;
+    }
+}
+
 std::vector<std::string> InstructionScanner::feed(std::string_view chunk) {
     std::vector<std::string> out;
     buf_.append(chunk);
+    total_fed_ += chunk.size();
 
     for (; pos_ < buf_.size(); ++pos_) {
         const char c = buf_[pos_];
@@ -115,6 +130,7 @@ std::vector<std::string> InstructionScanner::feed(std::string_view chunk) {
         // 其它字符（含 [ ] , 空白）都是分隔符，不影响配对
     }
 
+    compact();
     return out;
 }
 

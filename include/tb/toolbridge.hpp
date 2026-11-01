@@ -10,6 +10,8 @@
 //   3. 自定义组件 = 已有组件的参数化组合，合法性可递归证明
 //   4. LLM 通过 ILlmProvider 抽象接入，可换任意 OpenAI 兼容端点
 
+#include "tb/arena.hpp"
+
 #include <boost/json.hpp>
 
 #include <cstdint>
@@ -19,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -78,15 +81,23 @@ struct Instruction {
 
 class ModelContext {
 public:
-    void add_object(std::string id);
-    void add_kind(std::string kind);
+    ModelContext() = default;
+    ModelContext(const ModelContext& other);
+    ModelContext& operator=(const ModelContext& other);
+    ModelContext(ModelContext&&) noexcept = default;
+    ModelContext& operator=(ModelContext&&) noexcept = default;
+
+    void add_object(std::string_view id);
+    void add_kind(std::string_view kind);
     bool has_object(std::string_view id) const;
     bool has_kind(std::string_view kind) const;
     std::size_t object_count() const { return objects_.size(); }
+    std::size_t interned_bytes() const { return arena_.used(); }
 
 private:
-    std::vector<std::string> objects_;
-    std::vector<std::string> kinds_;
+    Arena arena_;
+    std::unordered_set<std::string_view, StringHash, std::equal_to<>> objects_;
+    std::unordered_set<std::string_view, StringHash, std::equal_to<>> kinds_;
 };
 
 using ParseResult = std::variant<boost::json::value, ValidationError>;
@@ -94,6 +105,9 @@ using ValidateResult = std::variant<Instruction, ValidationError>;
 
 ParseResult parse(std::string_view text);
 ValidateResult validate(const boost::json::value& doc, const ComponentLibrary& library);
+// 已解析的 Instruction（组合件展开后的子指令）走同一套参数/类型/范围校验。
+std::optional<ValidationError> validate_instruction(const Instruction& ins,
+                                                    const ComponentLibrary& library);
 std::optional<ValidationError> check_preconditions(const Instruction& ins,
                                                    const ComponentLibrary& library,
                                                    const ModelContext& ctx);
@@ -162,6 +176,21 @@ PipelineStats run_instructions(const std::string& json_text,
                                const CompositeRegistry& composites,
                                ModelContext& ctx,
                                SvgExecutor& out);
+
+// 单条指令（JSON object 或组合件）的校验 + 执行。
+// 组合件：先在 ModelContext 副本上跑完子指令的校验/前置条件，全部通过再执行，失败不改产物。
+struct ApplyOutcome {
+    bool ok = false;
+    bool is_composite = false;
+    std::string op;
+    std::string error;
+};
+
+ApplyOutcome apply_one(const boost::json::value& item, const ComponentLibrary& lib,
+                       const CompositeRegistry& composites, ModelContext& ctx, SvgExecutor& out);
+ApplyOutcome apply_one_text(std::string_view text, const ComponentLibrary& lib,
+                            const CompositeRegistry& composites, ModelContext& ctx,
+                            SvgExecutor& out);
 
 // ============================================================ LLM 接口
 

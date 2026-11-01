@@ -47,6 +47,10 @@ brew install boost openssl
 cmake -S . -B build
 cmake --build build
 
+# sanitizer（Debug 建议开）
+# cmake -S . -B build-asan -DTB_SANITIZE=ON
+# cmake -S . -B build-tsan -DTB_SANITIZE_THREAD=ON
+
 # 1. 看组件库（这也是喂给模型的 system prompt）
 ./build/tb library
 
@@ -185,9 +189,12 @@ LLM 是流式返回的。等完整回复再解析有两个浪费：首字节延�
 本项目的做法：**边收边校验边执行**。
 
 ```
-HTTP chunk ──► SseParser ──► delta 文本 ──► InstructionScanner ──► 完整指令 ──► 校验 ──► 执行
-                                              （跨 chunk 拼装）
+HTTP chunk ──► SseParser ──► delta 文本 ──► InstructionScanner ──► BoundedQueue ──► worker 线程
+                                              （跨 chunk 拼装，                 校验 + 执行
+                                               compact 丢掉已吐出文本）
 ```
+
+队列容量有上限：满了扫描侧阻塞（反压），校验失败则 close 队列，扫描侧 `submit` 返回 false，连接断开。
 
 实测（示例环境：mock 流，53 个 token，每个间隔 60ms，数值随机器浮动）：
 
@@ -200,8 +207,9 @@ HTTP chunk ──► SseParser ──► delta 文本 ──► InstructionScann
 三个实现要点：
 
 1. **`SseParser`**：按行累积，空行触发事件。任意字节位置切包都能正确还原（自测用 7 字节一刀验证）。
-2. **`InstructionScanner`**：只跟踪 `{}` 配对与字符串转义，**忽略 `[]`**，所以一个对象被切成三段也能拼回；每凑齐一个对象立刻交给下游。
-3. **提前中止**：校验失败时从回调里抛异常，沿协程栈展开，连接立即断开 —— 不再消费剩余流。
+2. **`InstructionScanner`**：只跟踪 `{}` 配对与字符串转义，**忽略 `[]`**，所以一个对象被切成三段也能拼回；每凑齐一个对象立刻交给下游。已吐出的前缀会被 compact 掉，缓冲区不随流长无限涨。
+3. **有界队列 + worker**：扫描（asio 回调）只入队；`mutex` + `condition_variable` 做反压。校验失败时 worker 关闭队列，生产者被唤醒后断开连接。
+4. **组合件两阶段**：展开后的每条子指令走同一套 `validate_instruction` + 前置条件；先在 `ModelContext` 副本上证明全部合法，再执行。失败不改产物。
 
 ## 接入大模型
 
@@ -241,18 +249,23 @@ TB_API_BASE=http://localhost:11434/v1  TB_MODEL=qwen2.5-coder
 ```
 mini-toolbridge/
 ├── include/tb/toolbridge.hpp   组件库 / 校验 / 组合件 / 执行器 / LLM 接口
+├── include/tb/arena.hpp        块式 bump arena（字符串 intern）
+├── include/tb/queue.hpp        有界阻塞队列
+├── include/tb/pipeline.hpp     扫描线程 → worker 的指令管道
 ├── include/tb/stream.hpp       SSE 解析 + 增量指令提取
 ├── include/tb/net.hpp          异步流式 POST + 本地 mock 服务
-├── src/toolbridge.cpp          七层校验 / 组合件 / SVG 执行器 / 管道
-├── src/stream.cpp              SseParser / InstructionScanner
+├── src/toolbridge.cpp          七层校验 / 组合件两阶段 / SVG 执行器 / 管道
+├── src/pipeline.cpp            InstructionPipeline worker
+├── src/stream.cpp              SseParser / InstructionScanner（含 compact）
 ├── src/net_stream.cpp          协程 HTTP 客户端（http/https）+ mock LLM
 ├── src/llm.cpp                 ILlmProvider + prompt 渲染 + 回复解析
 ├── include/tb/mcp.hpp          MCP 服务端接口
 ├── src/mcp_server.cpp          JSON-RPC 分发 + 三个工具
 ├── apps/tb.cpp                 CLI：library / validate / render / ask / mock-llm / mcp
-├── tests/stream_selftest.cpp   SSE 切包 + 增量提取自测
+├── tests/stream_selftest.cpp   SSE 切包 + compact 有界
 ├── tests/mcp_selftest.cpp      MCP 协议层自测（8 组断言）
-├── tests/validate_selftest.cpp 七层校验 + 管道健壮性自测
+├── tests/validate_selftest.cpp 七层校验 + 组合件两阶段
+├── tests/pipeline_selftest.cpp 反压 / close 唤醒 / worker 失败
 ├── examples/                   clock.json / gear.json / refs.json / bad.json
 └── docs/design.md              设计还原与面试问答
 ```
@@ -267,9 +280,10 @@ mini-toolbridge/
 | 执行器 | SVG 后端；真实系统的执行器是建模软件的接口 |
 | TLS | 已支持 https，但未做证书自定义与代理 |
 | 错误恢复 | 流式下可提前中止；未实现「把错误喂回模型自修正」 |
-| 并发 | 单请求；未做并发上限与限流 |
+| 并发 | 单请求内：扫描线程 + worker，有界队列反压；未做多请求限流 |
 | 超时 | 网络层支持可选超时（到点取消底层 socket，协程栈正常展开）；同步 ask 已启用 |
-| 性能 | 未测；700 条指令的查表若为线性扫描，长指令序列下会有开销 |
+| 内存 | `ModelContext` 用 arena intern + 哈希表；scanner 会 compact。未做指令对象池 |
+| 性能 | 未对 700 条组件库做过基准；查表已是 `map` / `unordered_set`，不再线性扫对象 id |
 
 ---
 

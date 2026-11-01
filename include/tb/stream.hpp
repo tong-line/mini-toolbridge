@@ -38,13 +38,18 @@ public:
     // 喂入一段文本，返回本次新抠出的完整指令 JSON（每个元素是一段独立文本）
     std::vector<std::string> feed(std::string_view chunk);
 
-    // 已经收到的字符总数（用于统计）
-    std::size_t total_chars() const { return buf_.size(); }
+    // 累计喂入的字符数（compact 不影响）
+    std::size_t total_chars() const { return total_fed_; }
+    // 当前缓冲区占用（已吐出的对象会被 compact 丢掉）
+    std::size_t buffered() const { return buf_.size(); }
 
 private:
+    void compact();
+
     std::string buf_;
     std::size_t pos_ = 0;        // 扫描游标（已处理到的位置）
     std::size_t obj_start_ = 0;  // 当前对象的起始偏移
+    std::size_t total_fed_ = 0;
     int depth_ = 0;              // {} 嵌套深度
     bool in_string_ = false;
     bool escaped_ = false;
