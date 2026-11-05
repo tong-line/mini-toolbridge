@@ -1,6 +1,6 @@
 # mini-toolbridge
 
-[![M8ven Score](https://m8ven.ai/badge/mcp/tong-line-mini-toolbridge-153nfr?v=2fe5ce4d29747455cb354c2598e9b7b6)](https://m8ven.ai/mcp/tong-line-mini-toolbridge-153nfr?s=readme)
+[![M8ven Score](https://m8ven.ai/badge/mcp/tong-line-mini-toolbridge)](https://m8ven.ai/mcp/tong-line-mini-toolbridge?s=readme)
 
 **自然语言 → 受约束的 JSON 指令 → 七层校验 → 建模产物。**
 
